@@ -38,5 +38,42 @@ int main() {
     cout << "Next transaction to process is: " << topTx.txId 
          << " with Gas: " << topTx.gasPrice << endl;
 
+    // --- Step 3: Block Execution & Attack Logic ---
+    vector<Transaction> blockExecution;
+    bool attackExecuted = false;
+
+    cout << "\n--- Miner is building the block ---\n";
+
+    // Loop through the mempool (highest gas gets pulled first)
+    while (!mempool.empty()) {
+        Transaction currentTx = mempool.top();
+        mempool.pop();
+
+        // The Scanner: Look for a massive DEX trade to front-run
+        if (!attackExecuted && currentTx.amount >= 10.0 && currentTx.receiver == "DEX") {
+            cout << "[!] Target spotted: " << currentTx.txId 
+                 << " paying Gas: " << currentTx.gasPrice << endl;
+
+            // The Attack: Create a transaction with slightly higher gas
+            Transaction attackTx = {"tx_hacker", "Attacker", "DEX", currentTx.amount, currentTx.gasPrice + 1.0};
+            
+            cout << "[!] Injecting front-run transaction paying Gas: " << attackTx.gasPrice << "\n" << endl;
+
+            // Push the attacker's transaction into the block FIRST
+            blockExecution.push_back(attackTx);
+            attackExecuted = true;
+        }
+
+        // Push the original transaction into the block AFTER ours
+        blockExecution.push_back(currentTx);
+    }
+
+    // --- Step 4: Prove the Attack Worked ---
+    cout << "--- Final Block Execution Order ---\n";
+    for (const auto& tx : blockExecution) {
+        cout << "Executed: " << tx.txId << " | Sender: " << tx.sender 
+             << " | Gas: " << tx.gasPrice << endl;
+    }
+    
     return 0;
 }
