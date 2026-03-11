@@ -1,79 +1,79 @@
+#include <boost/beast/core.hpp>
+#include <boost/beast/ssl.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/beast/websocket/ssl.hpp>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/ssl/stream.hpp>
+#include <nlohmann/json.hpp>
 #include <iostream>
-#include <queue>
-#include <vector>
 #include <string>
 
-using namespace std;
-
-// Step 1: Define the transaction structure
-struct Transaction {
-    string txId;
-    string sender;
-    string receiver;
-    double amount;
-    double gasPrice; // Validators prioritize high Gas
-
-    // Overload the < operator so the priority queue acts as a max-heap sorted by Gas
-    bool operator<(const Transaction& other) const {
-        return gasPrice < other.gasPrice;
-    }
-};
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace websocket = beast::websocket;
+namespace net = boost::asio;
+namespace ssl = boost::asio::ssl;
+using tcp = boost::asio::ip::tcp;
+using json = nlohmann::json;
 
 int main() {
-    cout << "Starting Mempool Monitor..." << endl;
-    
-    // Create the mempool
-    priority_queue<Transaction> mempool;
+    try {
+        // Your specific Alchemy connection details
+        std::string host = "eth-mainnet.g.alchemy.com";
+        std::string port = "443";
+        // Using the API key you generated earlier
+        std::string path = "/v2/WXVextenuyecpevTAhdpO";
 
-    // Step 2: Add dummy transactions
-    // Format: txId, sender, receiver, amount, gasPrice
-    mempool.push({"tx001", "Alice", "DEX", 1.5, 45.0});
-    mempool.push({"tx002", "Bob", "DEX", 15.0, 120.0}); // Huge trade, high gas!
-    mempool.push({"tx003", "Charlie", "DEX", 0.5, 30.0});
+        net::io_context ioc;
+        ssl::context ctx{ssl::context::tlsv12_client};
 
-    cout << "Added 3 transactions to the Mempool Monitor." << endl;
+        tcp::resolver resolver{ioc};
+        websocket::stream<beast::ssl_stream<tcp::socket>> ws{ioc, ctx};
 
-    // Let's print the top transaction to prove it sorted correctly
-    Transaction topTx = mempool.top();
-    cout << "Next transaction to process is: " << topTx.txId 
-         << " with Gas: " << topTx.gasPrice << endl;
+        auto const results = resolver.resolve(host, port);
+        auto ep = net::connect(get_lowest_layer(ws), results);
 
-    // --- Step 3: Block Execution & Attack Logic ---
-    vector<Transaction> blockExecution;
-    bool attackExecuted = false;
+        if(! SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str()))
+            throw beast::system_error(
+                beast::error_code(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()),
+                "Failed to set SNI Hostname");
 
-    cout << "\n--- Miner is building the block ---\n";
+        ws.next_layer().handshake(ssl::stream_base::client);
 
-    // Loop through the mempool (highest gas gets pulled first)
-    while (!mempool.empty()) {
-        Transaction currentTx = mempool.top();
-        mempool.pop();
+        ws.set_option(websocket::stream_base::decorator(
+            [](websocket::request_type& req) {
+                req.set(http::field::user_agent,
+                    std::string(BOOST_BEAST_VERSION_STRING) + " mempool-monitor");
+            }));
 
-        // The Scanner: Look for a massive DEX trade to front-run
-        if (!attackExecuted && currentTx.amount >= 10.0 && currentTx.receiver == "DEX") {
-            cout << "[!] Target spotted: " << currentTx.txId 
-                 << " paying Gas: " << currentTx.gasPrice << endl;
+        ws.handshake(host, path);
 
-            // The Attack: Create a transaction with slightly higher gas
-            Transaction attackTx = {"tx_hacker", "Attacker", "DEX", currentTx.amount, currentTx.gasPrice + 1.0};
+        // Tell the Ethereum node to send us every new pending transaction
+        json sub_msg = {
+            {"jsonrpc", "2.0"},
+            {"id", 1},
+            {"method", "eth_subscribe"},
+            {"params", {"newPendingTransactions"}}
+        };
+        
+        ws.write(net::buffer(sub_msg.dump()));
+        std::cout << "[+] Connected to Ethereum Mainnet! Waiting for live transactions...\n";
+
+        // Listen to the live stream infinitely
+        while(true) {
+            beast::flat_buffer buffer;
+            ws.read(buffer);
             
-            cout << "[!] Injecting front-run transaction paying Gas: " << attackTx.gasPrice << "\n" << endl;
-
-            // Push the attacker's transaction into the block FIRST
-            blockExecution.push_back(attackTx);
-            attackExecuted = true;
+            // Parse the incoming JSON data
+            std::string raw_data = beast::buffers_to_string(buffer.data());
+            json parsed = json::parse(raw_data);
+            
+            std::cout << "Live TX Hash Detected: " << parsed.dump() << "\n-------------------\n";
         }
-
-        // Push the original transaction into the block AFTER ours
-        blockExecution.push_back(currentTx);
     }
-
-    // --- Step 4: Prove the Attack Worked ---
-    cout << "--- Final Block Execution Order ---\n";
-    for (const auto& tx : blockExecution) {
-        cout << "Executed: " << tx.txId << " | Sender: " << tx.sender 
-             << " | Gas: " << tx.gasPrice << endl;
+    catch(std::exception const& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
     }
-    
     return 0;
 }
