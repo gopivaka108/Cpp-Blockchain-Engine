@@ -10,6 +10,10 @@
 #include <string>
 #include <cctype>
 #include <map>
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <chrono>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -19,45 +23,121 @@ namespace ssl = boost::asio::ssl;
 using tcp = boost::asio::ip::tcp;
 using json = nlohmann::json;
 
-int main() {
-    try {
-        std::string host = "eth-mainnet.g.alchemy.com";
-        std::string port = "443";
-        std::string path = "/v2/WXVextenuyecpevTAhdpO";
+// --- MULTITHREADING GLOBALS ---
+std::queue<std::string> tx_queue;  
+std::mutex queue_lock;             
 
+// --- CONSUMER: Background Worker ---
+void consumer_thread() {
+    try {
+        // Worker gets its own private connection to Alchemy so it doesn't collide with the main stream
         net::io_context ioc;
         ssl::context ctx{ssl::context::tlsv12_client};
+        tcp::resolver resolver{ioc};
+        websocket::stream<beast::ssl_stream<tcp::socket>> ws{ioc, ctx};
 
+        auto const results = resolver.resolve("eth-mainnet.g.alchemy.com", "443");
+        net::connect(get_lowest_layer(ws), results);
+        SSL_set_tlsext_host_name(ws.next_layer().native_handle(), "eth-mainnet.g.alchemy.com");
+        ws.next_layer().handshake(ssl::stream_base::client);
+        ws.handshake("eth-mainnet.g.alchemy.com", "/v2/WXVextenuyecpevTAhdpO");
+
+        while(true) {
+            std::string tx_hash = "";
+            
+            // Safely grab a hash from the line
+            {
+                std::lock_guard<std::mutex> lock(queue_lock);
+                if(!tx_queue.empty()) {
+                    tx_hash = tx_queue.front();
+                    tx_queue.pop();
+                }
+            }
+
+            // If queue is empty, take a tiny 10ms nap to save CPU, then check again
+            if(tx_hash.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            // Ask for transaction details
+            json tx_req = {{"jsonrpc", "2.0"}, {"id", 2}, {"method", "eth_getTransactionByHash"}, {"params", {tx_hash}}};
+            ws.write(net::buffer(tx_req.dump()));
+
+            beast::flat_buffer tx_buffer;
+            ws.read(tx_buffer);
+            json tx_details = json::parse(beast::buffers_to_string(tx_buffer.data()));
+
+            if (tx_details.contains("result") && !tx_details["result"].is_null() && !tx_details["result"]["to"].is_null()) {
+                std::string to_address = tx_details["result"]["to"];
+                std::string uniswap_v2 = "0x7a250d5630b4cf539739df2c5dacb4c659f2488d";
+                std::string uniswap_universal = "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad";
+
+                for(auto& c : to_address) { c = std::tolower(c); }
+
+                if (to_address == uniswap_v2 || to_address == uniswap_universal) {
+                    std::string gas_hex = "0x0";
+                    if (!tx_details["result"]["gasPrice"].is_null()) gas_hex = tx_details["result"]["gasPrice"];
+                    
+                    uint64_t gas_decimal = 0;
+                    if(gas_hex.length() > 2) gas_decimal = std::stoull(gas_hex.substr(2), nullptr, 16);
+
+                    std::string input_data = "None", method_id = "None";
+                    if (!tx_details["result"]["input"].is_null() && tx_details["result"]["input"].get<std::string>().length() >= 10) {
+                        input_data = tx_details["result"]["input"];
+                        method_id = input_data.substr(0, 10);
+                    }
+
+                    std::map<std::string, std::string> known_methods = {
+                        {"0x7ff36ab5", "swapExactETHForTokens"},
+                        {"0x38ed1739", "swapExactTokensForTokens"},
+                        {"0x18cbafe5", "swapExactTokensForETH"},
+                        {"0xb6f9de95", "swapExactETHForTokensSupportingFee"},
+                        {"0x3593564c", "execute (Universal Router)"}
+                    };
+
+                    std::string method_name = "Unknown (" + method_id + ")";
+                    if (known_methods.count(method_id)) method_name = known_methods[method_id];
+
+                    std::cout << "\n\n[!] UNISWAP TRADE DETECTED [!]\n";
+                    std::cout << "    Hash:        " << tx_hash << "\n";
+                    std::cout << "    Gas (Wei):   " << gas_decimal << "\n";
+                    std::cout << "    Action:      " << method_name << "\n";
+                    std::cout << "--------------------------------------\n";
+                }
+            }
+        }
+    } catch(std::exception const& e) {
+        std::cerr << "Worker Error: " << e.what() << std::endl;
+    }
+}
+
+// --- PRODUCER: Main Stream ---
+int main() {
+    try {
+        // Fire up the background worker thread
+        std::thread worker(consumer_thread);
+        worker.detach();
+
+        std::string host = "eth-mainnet.g.alchemy.com", port = "443", path = "/v2/WXVextenuyecpevTAhdpO";
+        net::io_context ioc;
+        ssl::context ctx{ssl::context::tlsv12_client};
         tcp::resolver resolver{ioc};
         websocket::stream<beast::ssl_stream<tcp::socket>> ws{ioc, ctx};
 
         auto const results = resolver.resolve(host, port);
-        auto ep = net::connect(get_lowest_layer(ws), results);
-
-        if(! SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str()))
-            throw beast::system_error(
-                beast::error_code(static_cast<int>(::ERR_get_error()), net::error::get_ssl_category()),
-                "Failed to set SNI Hostname");
-
+        net::connect(get_lowest_layer(ws), results);
+        SSL_set_tlsext_host_name(ws.next_layer().native_handle(), host.c_str());
         ws.next_layer().handshake(ssl::stream_base::client);
-
-        ws.set_option(websocket::stream_base::decorator(
-            [](websocket::request_type& req) {
-                req.set(http::field::user_agent,
-                    std::string(BOOST_BEAST_VERSION_STRING) + " mempool-monitor");
-            }));
-
+        ws.set_option(websocket::stream_base::decorator([](websocket::request_type& req) {
+            req.set(http::field::user_agent, std::string(BOOST_BEAST_VERSION_STRING) + " mempool-monitor");
+        }));
         ws.handshake(host, path);
 
-        json sub_msg = {
-            {"jsonrpc", "2.0"},
-            {"id", 1},
-            {"method", "eth_subscribe"},
-            {"params", {"newPendingTransactions"}}
-        };
-        
+        json sub_msg = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "eth_subscribe"}, {"params", {"newPendingTransactions"}}};
         ws.write(net::buffer(sub_msg.dump()));
-        std::cout << "[+] Connected to Ethereum Mainnet! Waiting for live transactions...\n";
+        
+        std::cout << "[+] Engine Online! Multithreaded scanning initiated...\n";
 
         while(true) {
             beast::flat_buffer buffer;
@@ -68,80 +148,17 @@ int main() {
             
             if (parsed.contains("method") && parsed["method"] == "eth_subscription") {
                 std::string tx_hash = parsed["params"]["result"];
-
-                json tx_req = {
-                    {"jsonrpc", "2.0"},
-                    {"id", 2},
-                    {"method", "eth_getTransactionByHash"},
-                    {"params", {tx_hash}}
-                };
-
-                ws.write(net::buffer(tx_req.dump()));
                 
-                json tx_details;
-                while(true) {
-                    beast::flat_buffer tx_buffer;
-                    ws.read(tx_buffer);
-                    tx_details = json::parse(beast::buffers_to_string(tx_buffer.data()));
-                    if (tx_details.contains("id") && tx_details["id"] == 2) break;
+                // Toss the hash to the worker thread and instantly go back to listening
+                {
+                    std::lock_guard<std::mutex> lock(queue_lock);
+                    tx_queue.push(tx_hash);
                 }
-
-                if (tx_details.contains("result") && !tx_details["result"].is_null() && !tx_details["result"]["to"].is_null()) {
-                    std::string to_address = tx_details["result"]["to"];
-                    std::string uniswap_v2 = "0x7a250d5630b4cf539739df2c5dacb4c659f2488d";
-                    std::string uniswap_universal = "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad";
-
-                    for(auto& c : to_address) { c = std::tolower(c); }
-                    
-                    std::cout << "." << std::flush; 
-
-                    if (to_address == uniswap_v2 || to_address == uniswap_universal) {
-                        std::string gas_hex = "0x0";
-                        if (!tx_details["result"]["gasPrice"].is_null()) {
-                            gas_hex = tx_details["result"]["gasPrice"];
-                        }
-                        
-                        uint64_t gas_decimal = 0;
-                        if(gas_hex.length() > 2) {
-                            gas_decimal = std::stoull(gas_hex.substr(2), nullptr, 16);
-                        }
-
-std::string input_data = "None";
-                        std::string method_id = "None";
-                        
-                        if (!tx_details["result"]["input"].is_null() && tx_details["result"]["input"].get<std::string>().length() >= 10) {
-                            input_data = tx_details["result"]["input"];
-                            method_id = input_data.substr(0, 10);
-                        }
-
-                        // Dictionary of the most common Uniswap trade functions
-                        std::map<std::string, std::string> known_methods = {
-                            {"0x7ff36ab5", "swapExactETHForTokens"},
-                            {"0x38ed1739", "swapExactTokensForTokens"},
-                            {"0x18cbafe5", "swapExactTokensForETH"},
-                            {"0xb6f9de95", "swapExactETHForTokensSupportingFee"},
-                            {"0x3593564c", "execute (Universal Router)"}
-                        };
-
-                        // Translate the hex to English
-                        std::string method_name = "Unknown (" + method_id + ")";
-                        if (known_methods.count(method_id)) {
-                            method_name = known_methods[method_id];
-                        }
-
-                        std::cout << "\n\n[!] UNISWAP TRADE DETECTED [!]\n";
-                        std::cout << "    Hash:        " << tx_hash << "\n";
-                        std::cout << "    Gas (Wei):   " << gas_decimal << "\n";
-                        std::cout << "    Action:      " << method_name << "\n";
-                        std::cout << "--------------------------------------\n";
-                    }
-                }
+                std::cout << "." << std::flush;
             }
         }
+    } catch(std::exception const& e) {
+        std::cerr << "Main Error: " << e.what() << std::endl;
     }
-    catch(std::exception const& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return EXIT_FAILURE;
-    }
-    return EXIT_SUCCESS;
+    return 0;
 }
