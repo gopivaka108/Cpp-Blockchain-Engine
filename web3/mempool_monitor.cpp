@@ -8,6 +8,7 @@
 #include <nlohmann/json.hpp>
 #include <iostream>
 #include <string>
+#include <cctype>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -19,10 +20,8 @@ using json = nlohmann::json;
 
 int main() {
     try {
-        // Your specific Alchemy connection details
         std::string host = "eth-mainnet.g.alchemy.com";
         std::string port = "443";
-        // Using the API key you generated earlier
         std::string path = "/v2/WXVextenuyecpevTAhdpO";
 
         net::io_context ioc;
@@ -49,7 +48,6 @@ int main() {
 
         ws.handshake(host, path);
 
-        // Tell the Ethereum node to send us every new pending transaction
         json sub_msg = {
             {"jsonrpc", "2.0"},
             {"id", 1},
@@ -60,7 +58,6 @@ int main() {
         ws.write(net::buffer(sub_msg.dump()));
         std::cout << "[+] Connected to Ethereum Mainnet! Waiting for live transactions...\n";
 
-// Listen to the live stream infinitely
         while(true) {
             beast::flat_buffer buffer;
             ws.read(buffer);
@@ -68,11 +65,9 @@ int main() {
             std::string raw_data = beast::buffers_to_string(buffer.data());
             json parsed = json::parse(raw_data);
             
-            // 1. Check if the message is a new pending transaction notification
             if (parsed.contains("method") && parsed["method"] == "eth_subscription") {
                 std::string tx_hash = parsed["params"]["result"];
 
-                // 2. Build the request to fetch the full transaction details
                 json tx_req = {
                     {"jsonrpc", "2.0"},
                     {"id", 2},
@@ -80,35 +75,26 @@ int main() {
                     {"params", {tx_hash}}
                 };
 
-                // 3. Send the request
                 ws.write(net::buffer(tx_req.dump()));
                 
-// 4. Read responses until we find the actual transaction details (ignore queued hashes)
                 json tx_details;
                 while(true) {
                     beast::flat_buffer tx_buffer;
                     ws.read(tx_buffer);
                     tx_details = json::parse(beast::buffers_to_string(tx_buffer.data()));
-                    
-                    // Break this inner loop only when we see the response to our specific request
-                    if (tx_details.contains("id") && tx_details["id"] == 2) {
-                        break;
-                    }
+                    if (tx_details.contains("id") && tx_details["id"] == 2) break;
                 }
 
-// 5. Extract data and filter for Uniswap V2 trades
                 if (tx_details.contains("result") && !tx_details["result"].is_null() && !tx_details["result"]["to"].is_null()) {
-                    
                     std::string to_address = tx_details["result"]["to"];
                     std::string uniswap_v2 = "0x7a250d5630b4cf539739df2c5dacb4c659f2488d";
+                    std::string uniswap_universal = "0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad";
 
-                    for(auto& c : to_address) { c = tolower(c); }
-
-                    // Heartbeat: print a dot for every single transaction scanned
+                    for(auto& c : to_address) { c = std::tolower(c); }
+                    
                     std::cout << "." << std::flush; 
 
-if (to_address == uniswap_v2) {
-                        // Safely handle gas price conversion
+                    if (to_address == uniswap_v2 || to_address == uniswap_universal) {
                         std::string gas_hex = "0x0";
                         if (!tx_details["result"]["gasPrice"].is_null()) {
                             gas_hex = tx_details["result"]["gasPrice"];
@@ -119,7 +105,6 @@ if (to_address == uniswap_v2) {
                             gas_decimal = std::stoull(gas_hex.substr(2), nullptr, 16);
                         }
 
-                        // Extract the raw input data (the trade payload)
                         std::string input_data = "None";
                         if (!tx_details["result"]["input"].is_null()) {
                             input_data = tx_details["result"]["input"];
@@ -128,7 +113,6 @@ if (to_address == uniswap_v2) {
                         std::cout << "\n\n[!] UNISWAP TRADE DETECTED [!]\n";
                         std::cout << "    Hash:        " << tx_hash << "\n";
                         std::cout << "    Gas (Wei):   " << gas_decimal << "\n";
-                        // Print the first 10 characters (the function selector)
                         std::cout << "    Method ID:   " << input_data.substr(0, 10) << "\n";
                         std::cout << "--------------------------------------\n";
                     }
@@ -138,6 +122,7 @@ if (to_address == uniswap_v2) {
     }
     catch(std::exception const& e) {
         std::cerr << "Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
     }
-    return 0;
+    return EXIT_SUCCESS;
 }
