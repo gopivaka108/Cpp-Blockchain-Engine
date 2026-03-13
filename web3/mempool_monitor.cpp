@@ -9,6 +9,7 @@
 #include <iostream>
 #include <string>
 #include <cctype>
+#include <map>
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -105,15 +106,33 @@ int main() {
                             gas_decimal = std::stoull(gas_hex.substr(2), nullptr, 16);
                         }
 
-                        std::string input_data = "None";
-                        if (!tx_details["result"]["input"].is_null()) {
+std::string input_data = "None";
+                        std::string method_id = "None";
+                        
+                        if (!tx_details["result"]["input"].is_null() && tx_details["result"]["input"].get<std::string>().length() >= 10) {
                             input_data = tx_details["result"]["input"];
+                            method_id = input_data.substr(0, 10);
+                        }
+
+                        // Dictionary of the most common Uniswap trade functions
+                        std::map<std::string, std::string> known_methods = {
+                            {"0x7ff36ab5", "swapExactETHForTokens"},
+                            {"0x38ed1739", "swapExactTokensForTokens"},
+                            {"0x18cbafe5", "swapExactTokensForETH"},
+                            {"0xb6f9de95", "swapExactETHForTokensSupportingFee"},
+                            {"0x3593564c", "execute (Universal Router)"}
+                        };
+
+                        // Translate the hex to English
+                        std::string method_name = "Unknown (" + method_id + ")";
+                        if (known_methods.count(method_id)) {
+                            method_name = known_methods[method_id];
                         }
 
                         std::cout << "\n\n[!] UNISWAP TRADE DETECTED [!]\n";
                         std::cout << "    Hash:        " << tx_hash << "\n";
                         std::cout << "    Gas (Wei):   " << gas_decimal << "\n";
-                        std::cout << "    Method ID:   " << input_data.substr(0, 10) << "\n";
+                        std::cout << "    Action:      " << method_name << "\n";
                         std::cout << "--------------------------------------\n";
                     }
                 }
