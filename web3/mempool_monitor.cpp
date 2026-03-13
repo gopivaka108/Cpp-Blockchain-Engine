@@ -103,6 +103,15 @@ void consumer_thread() {
                     std::cout << "    Hash:        " << tx_hash << "\n";
                     std::cout << "    Gas (Wei):   " << gas_decimal << "\n";
                     std::cout << "    Action:      " << method_name << "\n";
+
+                    // --- HEX SLICING LOGIC ---
+                    // If they are buying tokens with ETH, slice out the target token address
+                    if (method_id == "0x7ff36ab5" && input_data.length() >= 458) {
+                        // Skip the 24 zeros of padding, grab the 40-character address
+                        std::string target_token = "0x" + input_data.substr(418, 40);
+                        std::cout << "    Target:      " << target_token << " (Token being bought)\n";
+                    }
+                    
                     std::cout << "--------------------------------------\n";
                 }
             }
