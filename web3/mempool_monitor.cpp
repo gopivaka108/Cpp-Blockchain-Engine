@@ -107,6 +107,7 @@ void consumer_thread() {
 
 // --- HEX SLICING LOGIC ---
                     if (method_id == "0x7ff36ab5" && input_data.length() >= 458) {
+                        // swapExactETHForTokens
                         std::string target_token = "0x" + input_data.substr(418, 40);
                         
                         std::string eth_spent_hex = "0x0";
@@ -114,23 +115,32 @@ void consumer_thread() {
                             eth_spent_hex = tx_details["result"]["value"];
                         }
                         
-                        // Slice minimum tokens and strip the massive wall of leading zeros so C++ doesn't choke
                         std::string min_tokens_raw = input_data.substr(10, 64);
                         min_tokens_raw.erase(0, std::min(min_tokens_raw.find_first_not_of('0'), min_tokens_raw.size() - 1));
                         std::string min_tokens_hex = "0x" + min_tokens_raw;
 
-                        // --- BIG MATH CONVERSION ---
-                        double eth_spent = 0.0;
-                        double min_tokens = 0.0;
+                        double eth_spent = 0.0, min_tokens = 0.0;
                         try { 
-                            eth_spent = std::stod(eth_spent_hex) / 1e18;   // Convert Wei to ETH
-                            min_tokens = std::stod(min_tokens_hex) / 1e18; // Most ERC-20 tokens use 18 decimals
-                        } catch(...) {} // Failsafe so the engine never crashes on weird math
+                            eth_spent = std::stod(eth_spent_hex) / 1e18;
+                            min_tokens = std::stod(min_tokens_hex) / 1e18;
+                        } catch(...) {}
 
                         std::cout << "    Target:      " << target_token << " (Token being bought)\n";
                         std::cout << "    ETH Spent:   " << std::fixed << std::setprecision(6) << eth_spent << " ETH\n";
                         std::cout << "    Min Tokens:  " << std::fixed << std::setprecision(2) << min_tokens << "\n";
+
+                    } else if (method_id == "0x38ed1739" && input_data.length() >= 522) {
+                        // swapExactTokensForTokens (Token to Token swap)
+                        // path[0] is at offset 418, path[1] is at offset 482
+                        std::string token_selling = "0x" + input_data.substr(418, 40);
+                        std::string token_buying = "0x" + input_data.substr(482, 40);
                         
+                        std::cout << "    Selling:     " << token_selling << "\n";
+                        std::cout << "    Buying:      " << token_buying << "\n";
+
+                    } else if (method_id == "0x3593564c") {
+                        // Universal Router
+                        std::cout << "    Note:        Universal Router payload detected. Deep parsing bypassed for V1.0.\n";
                     }
                     
                     std::cout << "--------------------------------------\n";
